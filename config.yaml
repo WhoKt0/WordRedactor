@@ -1,0 +1,23 @@
+app:
+  dry_run: true
+  stop_on_error: false
+  delay_between_emails_seconds: 15
+  explicit_date: null
+  date_format: "%d.%m.%Y"
+
+paths:
+  word_template: "templates/Template_word.docx"
+  email_template: "templates/email_template.txt"
+  excel_file: "data/banks_uzbekistan_letter_bot_filled.xlsx"
+  output_docx_dir: "output/docx"
+  output_pdf_dir: "output/pdf"
+  reports_dir: "output/reports"
+
+email:
+  subject_template: "Предложение по поставке банковских карт и PIN-конвертов для {{BANK_NAME}}"
+
+pdf:
+  converter: "word_com"
+
+logging:
+  level: "INFO"

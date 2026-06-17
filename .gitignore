@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+output/docx/*
+output/pdf/*
+output/reports/*
+!output/docx/.gitkeep
+!output/pdf/.gitkeep
+!output/reports/.gitkeep
+logs/*.log
+!logs/.gitkeep
+*.tmp
