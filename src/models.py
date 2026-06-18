@@ -19,6 +19,8 @@ class RowStatus(str, Enum):
     GENERATED_NOT_SENT = "generated_not_sent"
     SENT = "sent"
     FAILED = "failed"
+    PDF_FAILED = "pdf_failed"
+    EMAIL_FAILED = "email_failed"
 
 
 @dataclass

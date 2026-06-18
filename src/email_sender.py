@@ -33,7 +33,13 @@ class EmailSender:
     def render_template(self, template_text: str, variables: dict[str, str]) -> str:
         def _replace(match: re.Match[str]) -> str:
             key = match.group(1)
-            return variables.get(f"{{{{{key}}}}}", variables.get(key, match.group(0)))
+            placeholder = f"{{{{{key}}}}}"
+            if placeholder in variables:
+                return variables[placeholder]
+            if key in variables:
+                return variables[key]
+            logger.warning("Email template variable not found in data: %s", placeholder)
+            return match.group(0)
 
         return PLACEHOLDER_PATTERN.sub(_replace, template_text)
 

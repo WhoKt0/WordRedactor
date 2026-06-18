@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from src.models import BankRow, Gender
+from src.name_utils import GreetingNameError, build_greeting_name
 
 EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -47,6 +48,14 @@ def validate_bank_row(row: BankRow) -> ValidationResult:
 
     if not row.greeting_name:
         errors.append("greeting_name is required")
+    else:
+        try:
+            build_greeting_name(row.greeting_name, row.chair_full_name)
+        except GreetingNameError:
+            errors.append(
+                "невозможно сформировать корректное обращение после «Уважаемый/Уважаемая» "
+                "минимум из двух слов"
+            )
 
     if not row.pdf_filename:
         errors.append("pdf_filename is required")

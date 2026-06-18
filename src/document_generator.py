@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 from docx import Document
@@ -13,6 +15,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from src.models import PlaceholderContext
+from src.word_process import quit_all_word_applications, remove_file_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -36,24 +39,75 @@ def generate_docx(
     if not template_path.exists():
         raise DocumentGeneratorError(f"Word template not found: {template_path}")
 
+    output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(template_path, output_path)
+    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
 
-    doc = Document(str(output_path))
-    replacements = context.as_dict()
-    warnings = replace_placeholders_in_document(doc, replacements)
-    for warning in warnings:
-        logger.warning(warning)
+    last_os_error: OSError | None = None
 
-    doc.save(str(output_path))
+    for attempt in range(1, 3):
+        try:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
 
-    remaining = find_unreplaced_placeholders(output_path)
-    if remaining:
-        raise UnreplacedPlaceholdersError(
-            f"Unreplaced placeholders in document: {', '.join(sorted(remaining))}"
-        )
+            shutil.copy2(template_path, temp_path)
+            doc = Document(str(temp_path))
+            replacements = context.as_dict()
+            warnings = replace_placeholders_in_document(doc, replacements)
+            for warning in warnings:
+                logger.warning(warning)
 
-    return output_path
+            doc.save(str(temp_path))
+            remaining = find_unreplaced_in_document(doc)
+            if remaining:
+                raise UnreplacedPlaceholdersError(
+                    f"Unreplaced placeholders in document: {', '.join(sorted(remaining))}"
+                )
+
+            _publish_docx(temp_path, output_path)
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            return output_path
+        except UnreplacedPlaceholdersError:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            last_os_error = exc
+            logger.warning(
+                "DOCX generation attempt %d failed for %s: %s",
+                attempt,
+                output_path,
+                exc,
+            )
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            if attempt < 2:
+                quit_all_word_applications(force_kill=True)
+                time.sleep(1)
+            else:
+                raise DocumentGeneratorError(
+                    f"не удалось создать DOCX (файл занят другим процессом): {output_path}"
+                ) from exc
+        except DocumentGeneratorError:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            raise DocumentGeneratorError(f"ошибка создания DOCX: {exc}") from exc
+
+    if last_os_error is not None:
+        raise DocumentGeneratorError(f"ошибка создания DOCX: {last_os_error}") from last_os_error
+    raise DocumentGeneratorError(f"не удалось создать DOCX: {output_path}")
+
+
+def _publish_docx(temp_path: Path, output_path: Path) -> None:
+    """Move temp DOCX into final location, replacing a locked file if needed."""
+    if output_path.exists():
+        remove_file_with_retry(output_path, max_attempts=3, quit_word_on_failure=True)
+    os.replace(temp_path, output_path)
 
 
 def replace_placeholders_in_document(
@@ -184,9 +238,8 @@ def _apply_replacements(
     return result
 
 
-def find_unreplaced_placeholders(docx_path: Path) -> set[str]:
-    """Scan document for remaining {{...}} placeholders."""
-    doc = Document(str(docx_path))
+def find_unreplaced_in_document(doc: DocumentObject) -> set[str]:
+    """Scan an in-memory document for remaining {{...}} placeholders."""
     texts: list[str] = []
 
     for paragraph in doc.paragraphs:
@@ -214,3 +267,8 @@ def find_unreplaced_placeholders(docx_path: Path) -> set[str]:
     for text in texts:
         remaining.update(UNREPLACED_PATTERN.findall(text))
     return remaining
+
+
+def find_unreplaced_placeholders(docx_path: Path) -> set[str]:
+    """Scan a DOCX file on disk for remaining {{...}} placeholders."""
+    return find_unreplaced_in_document(Document(str(docx_path)))

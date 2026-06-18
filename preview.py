@@ -1,4 +1,4 @@
-"""CLI entry point for the RenSer letter bot."""
+"""Preview generation: documents are created, outgoing numbers are not committed."""
 
 from __future__ import annotations
 
@@ -9,7 +9,12 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.main import main
+from src.main import run
+
+
+def main() -> int:
+    return run(ROOT, commit_numbers=False)
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
