@@ -1,5 +1,7 @@
 # RenSer — бот коммерческих писем
 
+> **Для AI-агентов:** сначала прочитайте [`AGENTS.md`](AGENTS.md) — там полный контекст проекта, границы изменений и команды. Это экономит время и токены.
+
 Production-ready бот для автоматической генерации персонализированных коммерческих писем по Word-шаблону, конвертации в PDF и отдельной рассылки по email.
 
 ## 1. Что делает бот
@@ -100,8 +102,9 @@ project/
   preview.py                  # Preview-генерация (по умолчанию)
   final_generate.py           # Финальная генерация с фиксацией номеров
   confirm_counter.py          # Просмотр/изменение счётчика номеров
-  email_preview.py            # Просмотр писем по manifest (без отправки)
-  email_test_send.py          # Одно тестовое письмо на ваш email
+  email_preview.py            # Просмотр писем по final manifest (без отправки)
+  email_test_send.py          # Тест по final manifest на ваш email
+  preview_one_mail.py         # Быстрый тест: 1 письмо после preview.py
   send_emails.py              # Реальная рассылка по final manifest
   run.py                      # CLI-запуск с флагами
   state/
@@ -154,7 +157,8 @@ project/
 | Плейсхолдер | Пример результата |
 |---|---|
 | `{{OUT_NUMBER}}` | `315` |
-| `{{DATE}}` | `02.06.2026` |
+| `{{DATE}}` | `18.06.2026` (синоним `{{TODAY}}`) |
+| `{{TODAY}}` | **Актуальная дата** на момент генерации (`date.today()`), формат из `config.yaml` → `date_format` |
 | `{{BANK_LEGAL_NAME}}` | `АК "Алокабанк"` |
 | `{{MR_MS}}` | `г-же` / `г-ну` |
 | `{{CHAIR_SHORT_DATIVE}}` | `Ирисбековой К. Н.` |
@@ -164,7 +168,7 @@ project/
 Пример блока в документе:
 
 ```text
-Исх № {{OUT_NUMBER}} от {{DATE}}.
+Исх № {{OUT_NUMBER}} от {{TODAY}}.
 
 Председателю правления
 {{BANK_LEGAL_NAME}}
@@ -172,6 +176,10 @@ project/
 
 {{GREETING_WORD}} {{GREETING_NAME}},
 ```
+
+`{{TODAY}}` и `{{DATE}}` — одно и то же: **дата дня запуска** генерации, не из Excel.
+Формат: `config.yaml` → `app.date_format` (сейчас `%d.%m.%Y` → `18.06.2026`).
+Чтобы зафиксировать конкретную дату: `app.explicit_date: "18.06.2026"`.
 
 ### Три шаблона для выравнивания обращения
 
@@ -218,17 +226,19 @@ copy .env.example .env
 ```
 
 ```env
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USER=
+SMTP_HOST=renser.kz
+SMTP_PORT=465
+SMTP_USER=manager4@renser.kz
 SMTP_PASSWORD=
-FROM_EMAIL=
+FROM_EMAIL=manager4@renser.kz
 FROM_NAME=RenSer Technologies
 
 # Used only on first state/generation_state.json creation.
 # Preview generations do not spend this number.
 START_OUT_NUMBER=315
 ```
+
+Скопируйте `.env.example` в `.env` и заполните реальные значения (включая `SMTP_PASSWORD`). Файл `.env` в git не попадает.
 
 ## 8. Настройка `config.yaml`
 
@@ -290,9 +300,10 @@ python send_emails.py
 |---|---|
 | `preview.py` | Проверка PDF, СВХИ не тратятся |
 | `final_generate.py` | Финальные PDF, СВХИ фиксируются, создаётся manifest |
-| `email_preview.py` | Показывает, кому будут письма; создаёт `ген_N_email_report.xlsx` со статусом `dry_run` |
-| `email_test_send.py` | Одно тестовое письмо на введённый email с префиксом `[TEST]` |
-| `send_emails.py` | Реальная рассылка; требует ввода `SEND` |
+| `email_preview.py` | Показывает, кому будут письма; создаёт `ген_N_email_report.xlsx` со статусом `dry_run`; **не отправляет** |
+| `email_test_send.py` | Тест по **final** manifest → ваш email; `--all` — все письма |
+| `preview_one_mail.py` | **Быстрый тест**: после `preview.py` → 1 письмо с первым PDF на `mr.moldyk007@gmail.com` |
+| `send_emails.py` | Реальная рассылка банкам; требует ввода `SEND` |
 
 ### Выбор manifest
 
@@ -302,17 +313,20 @@ python send_emails.py
 python send_emails.py --manifest output/reports/ген_5_manifest.xlsx
 python email_preview.py --manifest output/reports/ген_5_manifest.xlsx
 python email_test_send.py --manifest output/reports/ген_5_manifest.xlsx
+python email_test_send.py --all   # все письма manifest на ваш тестовый email
 ```
 
 ### Продолжение после сбоя
 
-Если рассылка прервалась, повторный `send_emails.py` **не отправляет повторно** строки со статусом `sent` в `ген_N_email_report.xlsx`. Повторяются только `failed` и `pending`.
+Если рассылка прервалась, повторный `send_emails.py` **не отправляет повторно** строки со статусом `sent` в `ген_N_email_report.xlsx`. Повторяются `failed`, `pending` и `dry_run`.
+
+Тестовая отправка (`email_test_send.py`) пишет отдельный `ген_N_email_test_report.xlsx` со статусами `test_sent` / `test_failed`. `send_emails.py` **не читает** этот файл — resume реальной рассылки на тест не влияет.
 
 ```bash
 python send_emails.py --resend-all   # принудительно отправить все заново
 ```
 
-Сопоставление строк: `generation_id + out_number + recipient_email + pdf_path`.
+Сопоставление строк: `generation_id + out_number + recipient_email + pdf_path`. Учитывается только статус `sent` (не `dry_run`, `failed`, `pending`, `test_sent`, `test_failed`).
 
 ### Email report
 
@@ -322,11 +336,14 @@ python send_emails.py --resend-all   # принудительно отправи
 
 ### Переменные в email-шаблоне
 
-В `templates/email_template.txt` и `config.yaml → email.subject_template`:
+В `templates/email_template.txt`, подпись в `templates/email_signature.txt` / `email_signature.html`, тема в `config.yaml → email.subject_template`.
+
+Письмо отправляется как **multipart/alternative**: plain text + HTML (синяя подпись, ссылка на сайт).
 
 | Переменная | Описание |
 |---|---|
-| `{{BANK_NAME}}` | Название банка для письма |
+| `{{BANK_NAME}}` | Краткое имя (`bank_name`) |
+| `{{EMAIL_BANK_NAME}}` | Название для email (`email_bank_name`) |
 | `{{BANK_LEGAL_NAME}}` | Юр. название |
 | `{{OUT_NUMBER}}` | Исходящий номер |
 | `{{DATE}}` | Дата письма |
@@ -338,13 +355,28 @@ python send_emails.py --resend-all   # принудительно отправи
 
 ### SMTP
 
-Заполните `.env`: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `FROM_EMAIL`, `FROM_NAME`.
+Заполните `.env` (не `.env.example`):
 
-Если SMTP не настроен, `send_emails.py` остановится с ошибкой:
+```env
+SMTP_HOST=renser.kz
+SMTP_PORT=465
+SMTP_USER=manager4@renser.kz
+SMTP_PASSWORD=ваш_пароль
+FROM_EMAIL=manager4@renser.kz
+FROM_NAME=RenSer Technologies
+```
+
+Пример для Plesk / Hoster.kz: порт **465** — подключение через `SMTP_SSL`; порт **587** — обычный SMTP с `STARTTLS`. Для порта 465 `starttls()` не вызывается.
+
+`SMTP_HOST` — это имя сервера (например `renser.kz`), а не email-адрес.
+
+Если SMTP не настроен, `send_emails.py` и `email_test_send.py` остановятся с ошибкой:
 
 ```text
-SMTP не настроен. Заполните .env: SMTP_HOST, FROM_EMAIL, SMTP_USER, SMTP_PASSWORD.
+SMTP не настроен. Заполните .env: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, FROM_EMAIL.
 ```
+
+`email_preview.py` SMTP-пароль не требует, потому что письма не отправляет.
 
 ## 11. Отчёты
 

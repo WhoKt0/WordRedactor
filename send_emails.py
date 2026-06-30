@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import Settings
-from src.email_pipeline import EmailPipeline, EmailPipelineError
+from src.email_pipeline import EmailPipeline, EmailPipelineError, validate_smtp_settings
 from src.logger_setup import setup_logging
 
 
@@ -37,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(settings.logging.level, settings.log_file_path)
 
     try:
+        validate_smtp_settings(settings, require_password=True)
         pipeline = EmailPipeline(ROOT, settings)
         return pipeline.run_send(
             manifest_arg=args.manifest,

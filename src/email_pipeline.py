@@ -19,14 +19,26 @@ from src.email_report import (
     EMAIL_STATUS_SENT,
     EMAIL_STATUS_SKIPPED_INVALID_EMAIL,
     EMAIL_STATUS_SKIPPED_PDF_MISSING,
+    EMAIL_STATUS_TEST_FAILED,
+    EMAIL_STATUS_TEST_SENT,
     EmailReport,
     EmailReportRow,
+    EmailTestReport,
+    EmailTestReportRow,
     email_report_path,
+    email_test_report_path,
     read_email_report,
     sent_resume_keys,
     write_email_report,
+    write_email_test_report,
 )
-from src.email_sender import EmailSender, EmailSenderError, _split_emails
+from src.email_sender import (
+    EmailSender,
+    EmailSenderError,
+    SMTP_HOST_LOOKS_LIKE_EMAIL,
+    _split_emails,
+    get_smtp_mode,
+)
 from src.output_utils import relative_project_path
 from src.validators import is_valid_email
 
@@ -41,7 +53,8 @@ SEND_CONFIRMATION_PROMPT = (
 TEST_EMAIL_PROMPT = "Введите тестовый email, на который отправить одно письмо: "
 
 SMTP_NOT_CONFIGURED_MESSAGE = (
-    "SMTP не настроен. Заполните .env: SMTP_HOST, FROM_EMAIL, SMTP_USER, SMTP_PASSWORD."
+    "SMTP не настроен. Заполните .env: SMTP_HOST, SMTP_PORT, SMTP_USER, "
+    "SMTP_PASSWORD, FROM_EMAIL."
 )
 
 
@@ -157,7 +170,52 @@ def resolve_manifest_path(
     return manifest_path
 
 
-def read_manifest(path: Path, project_root: Path) -> list[ManifestEntry]:
+def find_latest_preview_manifest(project_root: Path) -> Path:
+    reports_dir = project_root / "output" / "preview" / "reports"
+    candidates = sorted(
+        reports_dir.glob("ген_*_manifest.xlsx"),
+        key=lambda item: extract_generation_id(item),
+    )
+    if not candidates:
+        raise EmailPipelineError(
+            f"Preview manifest не найден в {reports_dir}. Сначала выполните preview.py."
+        )
+    return candidates[-1]
+
+
+def resolve_preview_manifest_path(
+    *,
+    project_root: Path,
+    manifest_arg: str | None,
+) -> Path:
+    if manifest_arg:
+        manifest_path = Path(manifest_arg)
+        if not manifest_path.is_absolute():
+            manifest_path = (project_root / manifest_path).resolve()
+    else:
+        manifest_path = find_latest_preview_manifest(project_root).resolve()
+
+    if not manifest_path.exists():
+        raise EmailPipelineError(f"Manifest не найден: {manifest_path}")
+
+    if not is_preview_manifest_path(manifest_path, project_root):
+        raise EmailPipelineError(
+            "preview_one_mail.py работает только с preview manifest "
+            "из output/preview/reports/. Сначала выполните preview.py."
+        )
+
+    return manifest_path
+
+
+def read_manifest(
+    path: Path,
+    project_root: Path,
+    *,
+    include_preview_rows: bool | None = None,
+) -> list[ManifestEntry]:
+    if include_preview_rows is None:
+        include_preview_rows = is_preview_manifest_path(path, project_root)
+
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
     rows_iter = ws.iter_rows(min_row=1, values_only=True)
@@ -181,7 +239,7 @@ def read_manifest(path: Path, project_root: Path) -> list[ManifestEntry]:
             continue
 
         mode = _cell(row_values, "mode", "FINAL")
-        if mode.upper() == "PREVIEW":
+        if mode.upper() == "PREVIEW" and not include_preview_rows:
             continue
 
         bank_name = _cell(row_values, "bank_name")
@@ -214,24 +272,75 @@ def read_manifest(path: Path, project_root: Path) -> list[ManifestEntry]:
     wb.close()
 
     if not entries:
-        raise EmailPipelineError(
-            f"Manifest пуст или содержит только PREVIEW-строки: {path}"
-        )
+        raise EmailPipelineError(f"Manifest пуст: {path}")
 
     return entries
 
 
-def validate_smtp_settings(settings: Settings) -> None:
+def validate_smtp_settings(settings: Settings, *, require_password: bool = True) -> None:
     env = settings.env
     missing: list[str] = []
+
     if not env.smtp_host:
         missing.append("SMTP_HOST")
+    elif "@" in env.smtp_host:
+        raise EmailPipelineError(SMTP_HOST_LOOKS_LIKE_EMAIL)
+
+    if not env.smtp_port or env.smtp_port < 1 or env.smtp_port > 65535:
+        missing.append("SMTP_PORT")
+
+    if not env.smtp_user:
+        missing.append("SMTP_USER")
+
+    if require_password and not env.smtp_password:
+        missing.append("SMTP_PASSWORD")
+
     if not env.from_email:
         missing.append("FROM_EMAIL")
-    if env.smtp_user and not env.smtp_password:
-        missing.append("SMTP_PASSWORD")
+    elif not is_valid_email(env.from_email):
+        raise EmailPipelineError(f"Невалидный FROM_EMAIL: {env.from_email!r}")
+
     if missing:
         raise EmailPipelineError(SMTP_NOT_CONFIGURED_MESSAGE)
+
+    if (
+        env.smtp_user
+        and env.from_email
+        and env.smtp_user.strip().lower() != env.from_email.strip().lower()
+    ):
+        logger.warning(
+            "SMTP_USER (%s) отличается от FROM_EMAIL (%s)",
+            env.smtp_user,
+            env.from_email,
+        )
+        print(
+            f"Предупреждение: SMTP_USER ({env.smtp_user}) "
+            f"отличается от FROM_EMAIL ({env.from_email})"
+        )
+
+
+def resolve_test_recipient_email(
+    settings: Settings,
+    *,
+    override: str | None = None,
+    prompt_if_missing: bool = True,
+) -> str:
+    """Return test recipient from --email, then TEST_MAIL in .env, else prompt."""
+    if override and override.strip():
+        email = override.strip()
+    elif settings.env.test_mail.strip():
+        email = settings.env.test_mail.strip()
+        print(f"Тестовый email из .env (TEST_MAIL): {email}")
+    elif prompt_if_missing:
+        email = input(TEST_EMAIL_PROMPT).strip()
+    else:
+        raise EmailPipelineError(
+            "Тестовый email не задан. Укажите TEST_MAIL в .env или флаг --email."
+        )
+
+    if not is_valid_email(email):
+        raise EmailPipelineError(f"Невалидный тестовый email: {email!r}")
+    return email
 
 
 def validate_optional_emails(value: str) -> bool:
@@ -272,16 +381,17 @@ def validate_pdf(pdf_path: Path) -> str | None:
 
 
 def build_email_variables(entry: ManifestEntry) -> dict[str, str]:
-    bank_name = entry.email_bank_name or entry.bank_name
     values = {
-        "{{BANK_NAME}}": bank_name,
+        "{{BANK_NAME}}": entry.bank_name,
+        "{{EMAIL_BANK_NAME}}": entry.email_bank_name,
         "{{BANK_LEGAL_NAME}}": entry.bank_legal_name,
         "{{OUT_NUMBER}}": str(entry.out_number),
         "{{DATE}}": entry.letter_date,
         "{{GREETING_WORD}}": entry.greeting_word,
         "{{GREETING_NAME}}": entry.greeting_name_final,
         "{{CHAIR_FULL_NAME}}": entry.chair_full_name,
-        "BANK_NAME": bank_name,
+        "BANK_NAME": entry.bank_name,
+        "EMAIL_BANK_NAME": entry.email_bank_name,
         "BANK_LEGAL_NAME": entry.bank_legal_name,
         "OUT_NUMBER": str(entry.out_number),
         "DATE": entry.letter_date,
@@ -384,6 +494,9 @@ def print_preflight_summary(
             print(f"  - {recipient}")
     print(f"FROM_EMAIL: {settings.env.from_email or '(не задан)'}")
     print(f"FROM_NAME: {settings.env.from_name}")
+    print(f"SMTP_HOST: {settings.env.smtp_host or '(не задан)'}")
+    print(f"SMTP_PORT: {settings.env.smtp_port}")
+    print(f"SMTP mode: {get_smtp_mode(settings.env.smtp_port)}")
     print(f"Delay between emails: {delay_seconds} seconds")
 
 
@@ -461,7 +574,11 @@ class EmailPipeline:
     def __init__(self, project_root: Path, settings: Settings | None = None) -> None:
         self.project_root = project_root.resolve()
         self.settings = settings or Settings(self.project_root)
-        self.email_sender = EmailSender(self.settings.env)
+        self.email_sender = EmailSender(
+            self.settings.env,
+            signature_text_path=self.settings.email_signature_text_path,
+            signature_html_path=self.settings.email_signature_html_path,
+        )
 
     def _load_context(
         self,
@@ -537,13 +654,8 @@ class EmailPipeline:
         print("Реальная отправка НЕ выполнялась.")
         return 0
 
-    def run_test_send(self, *, manifest_arg: str | None = None) -> int:
-        validate_smtp_settings(self.settings)
-        manifest_path, entries, _, _ = self._load_context(manifest_arg)
-        email_template = load_email_template(self.settings.email_template_path)
-        email_run_id = make_email_run_id(extract_generation_id(manifest_path))
-
-        target_entry: ManifestEntry | None = None
+    def _collect_sendable_entries(self, entries: list[ManifestEntry]) -> list[ManifestEntry]:
+        sendable: list[ManifestEntry] = []
         for entry in entries:
             status, _ = _evaluate_entry_for_send(
                 entry,
@@ -552,17 +664,252 @@ class EmailPipeline:
                 resend_all=True,
             )
             if status == EMAIL_STATUS_PENDING:
-                target_entry = entry
-                break
+                sendable.append(entry)
+        return sendable
 
-        if target_entry is None:
+    @staticmethod
+    def _render_test_subject_and_body(
+        *,
+        settings: Settings,
+        email_sender: EmailSender,
+        email_template: str,
+        entry: ManifestEntry,
+    ) -> tuple[str, str]:
+        subject, body = _render_subject_and_body(
+            settings=settings,
+            email_sender=email_sender,
+            email_template=email_template,
+            entry=entry,
+        )
+        subject = f"[TEST] {subject}"
+        body = (
+            "ТЕСТОВАЯ ОТПРАВКА.\n"
+            f"Оригинальный получатель: {entry.recipient_email}\n\n"
+            f"{body}"
+        )
+        return subject, body
+
+    @staticmethod
+    def _make_test_report_row(
+        *,
+        generation_id: int,
+        email_run_id: str,
+        entry: ManifestEntry,
+        test_email: str,
+        subject: str,
+        status: str,
+        attempts: int,
+        sent_at: str,
+        error_message: str,
+    ) -> EmailTestReportRow:
+        return EmailTestReportRow(
+            generation_id=generation_id,
+            email_run_id=email_run_id,
+            mode=entry.mode,
+            excel_row=entry.excel_row,
+            bank_name=entry.bank_name,
+            bank_legal_name=entry.bank_legal_name,
+            out_number=entry.out_number,
+            original_recipient_email=entry.recipient_email,
+            test_recipient_email=test_email,
+            cc_email=entry.cc_email,
+            bcc_email=entry.bcc_email,
+            subject=subject,
+            pdf_path=entry.pdf_path,
+            status=status,
+            attempts=attempts,
+            sent_at=sent_at,
+            error_message=error_message,
+        )
+
+    def _send_one_test_email(
+        self,
+        *,
+        entry: ManifestEntry,
+        test_email: str,
+        email_template: str,
+        generation_id: int,
+        email_run_id: str,
+    ) -> EmailTestReportRow:
+        subject, body = self._render_test_subject_and_body(
+            settings=self.settings,
+            email_sender=self.email_sender,
+            email_template=email_template,
+            entry=entry,
+        )
+        pdf_path = resolve_pdf_path(self.project_root, entry.pdf_path)
+
+        status = EMAIL_STATUS_TEST_FAILED
+        error_message = ""
+        sent_at = ""
+        attempts = 1
+
+        try:
+            self.email_sender.send(
+                to_email=test_email,
+                cc_email="",
+                bcc_email="",
+                subject=subject,
+                body=body,
+                pdf_path=pdf_path,
+                bank_name_for_log=entry.bank_name,
+            )
+            status = EMAIL_STATUS_TEST_SENT
+            sent_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"Тест отправлен: {entry.bank_name} -> {test_email} "
+                f"(оригинал: {entry.recipient_email}, СВХИ {entry.out_number})"
+            )
+        except EmailSenderError as exc:
+            error_message = str(exc)
+            print(
+                f"Ошибка теста: {entry.bank_name} -> {test_email}: {exc}"
+            )
+            logger.error(
+                "Test email failed for %s (%s): %s",
+                entry.bank_name,
+                entry.recipient_email,
+                exc,
+            )
+
+        return self._make_test_report_row(
+            generation_id=generation_id,
+            email_run_id=email_run_id,
+            entry=entry,
+            test_email=test_email,
+            subject=subject,
+            status=status,
+            attempts=attempts,
+            sent_at=sent_at,
+            error_message=error_message,
+        )
+
+    def run_test_send(
+        self,
+        *,
+        manifest_arg: str | None = None,
+        send_all: bool = False,
+        recipient_email: str | None = None,
+    ) -> int:
+        validate_smtp_settings(self.settings)
+        manifest_path, entries, _, _ = self._load_context(manifest_arg)
+        email_template = load_email_template(self.settings.email_template_path)
+        generation_id = extract_generation_id(manifest_path)
+        email_run_id = make_email_run_id(generation_id)
+        delay_seconds = self.settings.app.delay_between_emails_seconds
+
+        sendable_entries = self._collect_sendable_entries(entries)
+        if not sendable_entries:
             print("Не найдено ни одной строки manifest с валидным PDF и email.")
             return 1
 
-        test_email = input(TEST_EMAIL_PROMPT).strip()
-        if not is_valid_email(test_email):
-            print(f"Невалидный тестовый email: {test_email!r}")
+        targets = sendable_entries if send_all else [sendable_entries[0]]
+
+        try:
+            test_email = resolve_test_recipient_email(
+                self.settings,
+                override=recipient_email,
+            )
+        except EmailPipelineError as exc:
+            print(exc)
             return 1
+
+        if send_all:
+            print(f"Тестовых писем к отправке: {len(targets)}")
+            print(f"Получатель теста: {test_email}")
+            if delay_seconds > 0 and len(targets) > 1:
+                wait_seconds = delay_seconds * (len(targets) - 1)
+                print(
+                    f"Задержка между письмами: {delay_seconds} сек "
+                    f"(~{wait_seconds // 60} мин {wait_seconds % 60} сек ожидания)"
+                )
+
+        test_report_path = email_test_report_path(self.settings.reports_dir, generation_id)
+        report_rows: list[EmailTestReportRow] = []
+        sent_count = 0
+        failed_count = 0
+
+        for index, entry in enumerate(targets):
+            report_row = self._send_one_test_email(
+                entry=entry,
+                test_email=test_email,
+                email_template=email_template,
+                generation_id=generation_id,
+                email_run_id=email_run_id,
+            )
+            report_rows.append(report_row)
+            if report_row.status == EMAIL_STATUS_TEST_SENT:
+                sent_count += 1
+            else:
+                failed_count += 1
+
+            write_email_test_report(
+                EmailTestReport(
+                    generation_id=generation_id,
+                    report_path=test_report_path,
+                    rows=report_rows,
+                )
+            )
+
+            has_more = index < len(targets) - 1
+            if has_more and delay_seconds > 0:
+                logger.info("Waiting %d seconds before next test email...", delay_seconds)
+                time.sleep(delay_seconds)
+
+        print()
+        print("TEST EMAIL SUMMARY")
+        print(f"Отправлено: {sent_count}")
+        print(f"Ошибок: {failed_count}")
+        print(
+            "Test email report: "
+            f"{relative_project_path(self.project_root, test_report_path)}"
+        )
+        return 0 if failed_count == 0 else 1
+
+    def run_preview_one_mail(
+        self,
+        *,
+        manifest_arg: str | None = None,
+        recipient_email: str | None = None,
+    ) -> int:
+        """Fast test: one email from preview manifest to a fixed address."""
+        validate_smtp_settings(self.settings)
+        try:
+            test_email = resolve_test_recipient_email(
+                self.settings,
+                override=recipient_email,
+                prompt_if_missing=False,
+            )
+        except EmailPipelineError as exc:
+            print(exc)
+            return 1
+        manifest_path = resolve_preview_manifest_path(
+            project_root=self.project_root,
+            manifest_arg=manifest_arg,
+        )
+        entries = read_manifest(manifest_path, self.project_root)
+        email_template = load_email_template(self.settings.email_template_path)
+        generation_id = extract_generation_id(manifest_path)
+        email_run_id = make_email_run_id(generation_id)
+        preview_reports_dir = self.project_root / "output" / "preview" / "reports"
+
+        sendable_entries = self._collect_sendable_entries(entries)
+        if not sendable_entries:
+            print("Не найдено ни одной строки preview manifest с валидным PDF и email.")
+            print("Сначала выполните preview.py.")
+            return 1
+
+        target_entry = sendable_entries[0]
+
+        manifest_rel = relative_project_path(self.project_root, manifest_path)
+        pdf_path = resolve_pdf_path(self.project_root, target_entry.pdf_path)
+        print()
+        print("PREVIEW ONE MAIL (fast test)")
+        print(f"Manifest: {manifest_rel}")
+        print(f"Банк: {target_entry.bank_name} (строка Excel {target_entry.excel_row})")
+        print(f"PDF: {relative_project_path(self.project_root, pdf_path)}")
+        print(f"Оригинальный email банка: {target_entry.recipient_email}")
+        print(f"Отправка на: {test_email}")
 
         subject, body = _render_subject_and_body(
             settings=self.settings,
@@ -572,12 +919,12 @@ class EmailPipeline:
         )
         subject = f"[TEST] {subject}"
         body = (
-            f"ТЕСТОВАЯ ОТПРАВКА. Оригинальный получатель: {target_entry.recipient_email}\n\n"
+            "ТЕСТ PREVIEW (fast).\n"
+            f"Оригинальный получатель: {target_entry.recipient_email}\n\n"
             f"{body}"
         )
-        pdf_path = resolve_pdf_path(self.project_root, target_entry.pdf_path)
 
-        status = EMAIL_STATUS_FAILED
+        status = EMAIL_STATUS_TEST_FAILED
         error_message = ""
         sent_at = ""
         attempts = 1
@@ -592,34 +939,39 @@ class EmailPipeline:
                 pdf_path=pdf_path,
                 bank_name_for_log=target_entry.bank_name,
             )
-            status = EMAIL_STATUS_SENT
+            status = EMAIL_STATUS_TEST_SENT
             sent_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"Тестовое письмо отправлено на {test_email}")
+            print(f"Письмо отправлено на {test_email}")
         except EmailSenderError as exc:
             error_message = str(exc)
-            print(f"Ошибка отправки тестового письма: {exc}")
-            logger.error("Test email failed: %s", exc)
+            print(f"Ошибка отправки: {exc}")
+            logger.error("Preview one mail failed: %s", exc)
 
-        report = EmailReport(
-            generation_id=extract_generation_id(manifest_path),
-            report_path=email_report_path(
-                self.settings.reports_dir,
-                extract_generation_id(manifest_path),
-            ),
-            rows=[
-                _prepare_report_row(
-                    entry=target_entry,
-                    email_run_id=email_run_id,
-                    subject=subject,
-                    status=status,
-                    attempts=attempts,
-                    sent_at=sent_at,
-                    error_message=error_message,
-                )
-            ],
+        test_report_path = email_test_report_path(preview_reports_dir, generation_id)
+        write_email_test_report(
+            EmailTestReport(
+                generation_id=generation_id,
+                report_path=test_report_path,
+                rows=[
+                    self._make_test_report_row(
+                        generation_id=generation_id,
+                        email_run_id=email_run_id,
+                        entry=target_entry,
+                        test_email=test_email,
+                        subject=subject,
+                        status=status,
+                        attempts=attempts,
+                        sent_at=sent_at,
+                        error_message=error_message,
+                    )
+                ],
+            )
         )
-        write_email_report(report)
-        return 0 if status == EMAIL_STATUS_SENT else 1
+        print(
+            "Test email report: "
+            f"{relative_project_path(self.project_root, test_report_path)}"
+        )
+        return 0 if status == EMAIL_STATUS_TEST_SENT else 1
 
     def run_send(
         self,

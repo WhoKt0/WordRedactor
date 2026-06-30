@@ -33,6 +33,28 @@ EMAIL_STATUS_SENT = "sent"
 EMAIL_STATUS_FAILED = "failed"
 EMAIL_STATUS_SKIPPED_PDF_MISSING = "skipped_pdf_missing"
 EMAIL_STATUS_SKIPPED_INVALID_EMAIL = "skipped_invalid_email"
+EMAIL_STATUS_TEST_SENT = "test_sent"
+EMAIL_STATUS_TEST_FAILED = "test_failed"
+
+EMAIL_TEST_REPORT_COLUMNS = [
+    "generation_id",
+    "email_run_id",
+    "mode",
+    "excel_row",
+    "bank_name",
+    "bank_legal_name",
+    "out_number",
+    "original_recipient_email",
+    "test_recipient_email",
+    "cc_email",
+    "bcc_email",
+    "subject",
+    "pdf_path",
+    "status",
+    "attempts",
+    "sent_at",
+    "error_message",
+]
 
 
 def _safe_int(value: str, default: int = 0) -> int:
@@ -79,8 +101,40 @@ class EmailReport:
     rows: list[EmailReportRow] = field(default_factory=list)
 
 
+@dataclass
+class EmailTestReportRow:
+    generation_id: int
+    email_run_id: str
+    mode: str
+    excel_row: int
+    bank_name: str
+    bank_legal_name: str
+    out_number: int
+    original_recipient_email: str
+    test_recipient_email: str
+    cc_email: str
+    bcc_email: str
+    subject: str
+    pdf_path: str
+    status: str = EMAIL_STATUS_TEST_FAILED
+    attempts: int = 0
+    sent_at: str = ""
+    error_message: str = ""
+
+
+@dataclass
+class EmailTestReport:
+    generation_id: int
+    report_path: Path
+    rows: list[EmailTestReportRow] = field(default_factory=list)
+
+
 def email_report_path(reports_dir: Path, generation_id: int) -> Path:
     return reports_dir / f"ген_{generation_id}_email_report.xlsx"
+
+
+def email_test_report_path(reports_dir: Path, generation_id: int) -> Path:
+    return reports_dir / f"ген_{generation_id}_email_test_report.xlsx"
 
 
 def write_email_report(report: EmailReport) -> Path:
@@ -192,3 +246,50 @@ def sent_resume_keys(report: EmailReport) -> set[tuple[int, int, str, str]]:
         for row in report.rows
         if row.status == EMAIL_STATUS_SENT
     }
+
+
+def write_email_test_report(report: EmailTestReport) -> Path:
+    report.report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "email_test_report"
+
+    header_font = Font(bold=True)
+    for col_idx, col_name in enumerate(EMAIL_TEST_REPORT_COLUMNS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+
+    for row_idx, email_row in enumerate(report.rows, start=2):
+        values = [
+            email_row.generation_id,
+            email_row.email_run_id,
+            email_row.mode,
+            email_row.excel_row,
+            email_row.bank_name,
+            email_row.bank_legal_name,
+            email_row.out_number,
+            email_row.original_recipient_email,
+            email_row.test_recipient_email,
+            email_row.cc_email,
+            email_row.bcc_email,
+            email_row.subject,
+            email_row.pdf_path,
+            email_row.status,
+            email_row.attempts,
+            email_row.sent_at,
+            email_row.error_message,
+        ]
+        for col_idx, value in enumerate(values, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            if cell.value is not None:
+                max_length = max(max_length, len(str(cell.value)))
+        ws.column_dimensions[column_letter].width = min(max_length + 2, 60)
+
+    wb.save(report.report_path)
+    return report.report_path

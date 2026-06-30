@@ -520,6 +520,11 @@ def run(
     manifest_rows: list[ManifestRow] = []
     current_out_number = get_next_out_number(state)
     date_str = settings.format_date()
+    logger.info(
+        "Дата писем для этого запуска: %s (формат из config.yaml date_format; "
+        "в Word-шаблоне используйте {{TODAY}} или {{DATE}})",
+        date_str,
+    )
 
     try:
         valid_rows = preflight.valid_rows

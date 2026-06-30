@@ -1,4 +1,4 @@
-"""Send test email(s) from the latest final manifest to your address."""
+"""Fast test: send one preview email to TEST_MAIL from .env (first bank PDF)."""
 
 from __future__ import annotations
 
@@ -16,15 +16,15 @@ from src.logger_setup import setup_logging
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Send one test email from manifest")
-    parser.add_argument(
-        "--manifest",
-        help="Path to final manifest (default: latest in output/reports/)",
+    parser = argparse.ArgumentParser(
+        description=(
+            "Отправить одно тестовое письмо по preview manifest "
+            "(после preview.py) на TEST_MAIL из .env"
+        )
     )
     parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Send all manifest emails to your test address (not to banks)",
+        "--manifest",
+        help="Path to preview manifest (default: latest in output/preview/reports/)",
     )
     parser.add_argument(
         "--email",
@@ -44,9 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         validate_smtp_settings(settings, require_password=True)
         pipeline = EmailPipeline(ROOT, settings)
-        return pipeline.run_test_send(
+        return pipeline.run_preview_one_mail(
             manifest_arg=args.manifest,
-            send_all=args.all,
             recipient_email=args.email,
         )
     except EmailPipelineError as exc:

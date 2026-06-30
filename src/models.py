@@ -80,6 +80,7 @@ class PlaceholderContext:
         return {
             "{{OUT_NUMBER}}": str(self.out_number),
             "{{DATE}}": self.date_str,
+            "{{TODAY}}": self.date_str,
             "{{BANK_LEGAL_NAME}}": self.bank_legal_name,
             "{{MR_MS}}": self.mr_ms,
             "{{CHAIR_SHORT_DATIVE}}": self.chair_short_dative,

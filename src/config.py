@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +28,10 @@ class EnvSettings(BaseSettings):
     from_email: str = Field(default="", alias="FROM_EMAIL")
     from_name: str = Field(default="RenSer Technologies", alias="FROM_NAME")
     start_out_number: int = Field(default=315, alias="START_OUT_NUMBER")
+    test_mail: str = Field(
+        default="",
+        validation_alias=AliasChoices("TEST_MAIL", "Test_mail", "test_mail"),
+    )
 
 
 class AppConfig(BaseSettings):
@@ -41,6 +45,8 @@ class AppConfig(BaseSettings):
 class PathsConfig(BaseSettings):
     word_template: str = "templates/letter_template.docx"
     email_template: str = "templates/email_template.txt"
+    email_signature_text: str = "templates/email_signature.txt"
+    email_signature_html: str = "templates/email_signature.html"
     excel_file: str = "data/banks.xlsx"
     output_docx_dir: str = "output/docx"
     output_pdf_dir: str = "output/pdf"
@@ -49,7 +55,7 @@ class PathsConfig(BaseSettings):
 
 class EmailConfig(BaseSettings):
     subject_template: str = (
-        "Предложение по поставке банковских карт и PIN-конвертов для {{BANK_NAME}}"
+        "Предложение по поставке банковских карт и PIN-конвертов для {{EMAIL_BANK_NAME}}"
     )
 
 
@@ -91,6 +97,14 @@ class Settings:
     @property
     def email_template_path(self) -> Path:
         return self.resolve(self.paths.email_template)
+
+    @property
+    def email_signature_text_path(self) -> Path:
+        return self.resolve(self.paths.email_signature_text)
+
+    @property
+    def email_signature_html_path(self) -> Path:
+        return self.resolve(self.paths.email_signature_html)
 
     @property
     def excel_file_path(self) -> Path:

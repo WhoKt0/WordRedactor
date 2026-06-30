@@ -8,7 +8,9 @@ app:
 paths:
   word_template: "templates/Template_word.docx"
   email_template: "templates/email_template.txt"
-  excel_file: "data/banks_uzbekistan_letter_bot_filled.xlsx"
+  email_signature_text: "templates/email_signature.txt"
+  email_signature_html: "templates/email_signature.html"
+  excel_file: "data/ТуркменистанФейкПочта.xlsx"
   output_docx_dir: "output/docx"
   output_pdf_dir: "output/pdf"
   reports_dir: "output/reports"
